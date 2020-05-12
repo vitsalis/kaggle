@@ -1,14 +1,11 @@
--------------------------
-Titanic Competition Notes
--------------------------
+# Titanic Competition Notes
 
-Notebook 1: https://www.kaggle.com/yassineghouzam/titanic-top-4-with-ensemble-modeling
+Notebook Studied: https://www.kaggle.com/yassineghouzam/titanic-top-4-with-ensemble-modeling
 
->>> Load and check data
+## Load and check data
 
 -   Read csvs into train, test
 
-# TODO google
 -   Detect outliers using Turkey method
 
 -   Drop outliers:
@@ -20,7 +17,7 @@ Notebook 1: https://www.kaggle.com/yassineghouzam/titanic-top-4-with-ensemble-mo
 -   Check for missing or null values
 
 
->>> Feature Analysis
+## Feature Analysis
 
 -    Plot heatmap
         sns.heatmap(train[["Survived", "SibSp", "Parch", "Age", "Fare"]].corr(), annot=True, fmt=".2f", cmap="coolwarm")
@@ -97,14 +94,14 @@ Notebook 1: https://www.kaggle.com/yassineghouzam/titanic-top-4-with-ensemble-mo
     * Hypothesis: more first class passengers coming from Cherbourg
         kid="count" on factorplot
 
->>> Filing missing values
+## Filing missing values
 
 -   Age
         * Since the re are subpopulations with more chance to survive, preferable to keep the age feature
         and impute the missing values.
         * fill missing values with similar rows according to pclass, parch and sibsp
 
->>> Feature Engineering
+## Feature Engineering
 
 -   Name/Title
     * Keep title instead of name
@@ -130,7 +127,7 @@ Notebook 1: https://www.kaggle.com/yassineghouzam/titanic-top-4-with-ensemble-mo
         * dataset = pd.get_dummies(dataset, columns=["Ticket"], prefix="T")
         etc
 
->>> Modeling
+## Modeling
 
 -   Separate train and test dataset
 
@@ -138,7 +135,7 @@ Notebook 1: https://www.kaggle.com/yassineghouzam/titanic-top-4-with-ensemble-mo
 
 -   Set X, y, drop survived from X
 
->>> Simple Modeling
+## Simple Modeling
 
 -   Cross validate models
     * Compare 10 popular classifiers and evaluate the mean accuracy of each one of them
@@ -169,17 +166,17 @@ Notebook 1: https://www.kaggle.com/yassineghouzam/titanic-top-4-with-ensemble-mo
 
 -   Choose algorithms for ensembling
 
->>> Hyperparameter tuning for best models
+## Hyperparameter tuning for best models
 
 -   Perform grid search optimization for AdaBoost, ExtraTrees, RandomForest, GradientBoosting and SVC
     to find the best parameters.
 
->>> Plotting learning curves
+## Plotting learning curves
 
 -   Plotting learning curves is a good way to see if we're overfitting the dataset.
 -   Plot learning curves for all the above algorithms.
 
->>> Feature importance of tree based classifiers
+## Feature importance of tree based classifiers
 
 -   In order to see the most informative features for the prediction of passengers survival,
     display the feature importance for the 4 tree based classifiers (Adaboost, ExtraTrees, RandomForest and GradientBoosting)
@@ -195,7 +192,7 @@ Notebook 1: https://www.kaggle.com/yassineghouzam/titanic-top-4-with-ensemble-mo
 -   Concatanate test predictions, and plot correllation heatmap.
     * Predictions seem to be pretty similar except when adaboost is compared with the other classifiers.
 
->>> Ensemble modeling
+## Ensemble modeling
 
 -   Choose a voting classifier to combine the predictions coming from the 5 classifiers.
     * voting = 'soft' to take into account the probability of each vote.
