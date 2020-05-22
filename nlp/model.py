@@ -1,114 +1,123 @@
-from absl import app, flags, logging
-
-import torch as th
-import numpy as np
-
+import sh
 import nlp
 import transformers
+import torch as th
+import pytorch_lightning as pl
 
+from absl import logging, app, flags
 
-flags.DEFINE_boolean('debug', False, '')
-flags.DEFINE_integer('epochs', 1, '')
-flags.DEFINE_integer('batch_size', 8, '')
-flags.DEFINE_float('lr', 1e-2, '')
-flags.DEFINE_float('momentum', .9, '')
-flags.DEFINE_string('model', 'bert-base-uncased', '')
-flags.DEFINE_integer('seq_length', 32, '')
-flags.DEFINE_integer('percent', 5, '')
-
-FLAGS = flags.FLAGS
-
-class SentimentClassifier(th.nn.Module):
-    def __init__(self, model):
+class SentimentClassifier(pl.LightningModule):
+    def __init__(self, params):
         super().__init__()
-        self.model = transformers.BertForSequenceClassification.from_pretrained(model)
+        self.train_ds = None
+        self.valid_ds = None
 
-    def forward(self, xb):
-        mask = (xb != 0).float()
-        res, = self.model(xb, mask)
-        return res
+        self.batch_size = params['batch_size']
+        self.debug = params['debug']
+        self.percent = params['percent']
+        self.model_name = params['model']
+        self.seq_length = params['seq_length']
+        self.lr = params['lr']
 
-def get_loss(losses, nums):
-    return np.sum(np.multiply(losses, nums)) / np.sum(nums)
+        self.model = transformers.BertForSequenceClassification.from_pretrained(self.model_name)
+        self.loss = th.nn.CrossEntropyLoss(reduction='none') # TODO: what does reduction do?
 
-def get_dl(ds, batch_size):
-    return th.utils.data.DataLoader(
-        ds,
-        batch_size=batch_size,
-        shuffle=True,
-        drop_last=False
-    )
 
-def load_data():
-    tokenizer = transformers.BertTokenizer.from_pretrained(FLAGS.model)
-    def _tokenize(x):
-        x['input_ids'] = tokenizer.batch_encode_plus(
-                            x['text'],
-                            max_length=FLAGS.seq_length,
-                            pad_to_max_length=True)['input_ids']
-        return x
+    def prepare_data(self):
+        tokenizer = transformers.BertTokenizer.from_pretrained(self.model_name)
+        seq_length = self.seq_length
 
-    def _prepare_ds(split):
-        ds = nlp.load_dataset('imdb', split=f'{split}[:{FLAGS.batch_size if FLAGS.debug else f"{FLAGS.percent}%"}]')
-        ds = ds.map(_tokenize, batched=True)
-        ds.set_format(type='torch', columns=['input_ids', 'label'])
-        return ds
+        def _tokenize(x):
+            x['input_ids'] = tokenizer.batch_encode_plus(
+                    x['text'],
+                    max_length=seq_length,
+                    pad_to_max_length=True)['input_ids']
+            return x
 
-    return map(_prepare_ds, ('train', 'test'))
+        def _prepare_ds(split):
+            ds = nlp.load_dataset('imdb', split=f'{split}[:{self.batch_size if self.debug else f"{self.percent}%"}]')
+            ds = ds.map(_tokenize, batched=True)
+            ds.set_format(type='torch', columns=['input_ids', 'label'])
+            return ds
 
-def get_optimizer(model, lr, mom):
-    return th.optim.Adam(model.parameters(), lr=lr)
+        self.train_ds, self.valid_ds = map(_prepare_ds, ('train', 'test'))
 
-def get_model(model):
-    return SentimentClassifier(model)
+    def forward(self, input_ids):
+        mask = (input_ids != 0).float()
+        logits, = self.model(input_ids, mask)
+        return logits
 
-def loss_batch(model, loss_func, data, target, optimizer=None):
-    loss = loss_func(model(data), target).sum()
-    if optimizer != None:
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
+    def training_step(self, batch, batch_idx):
+        logits = self.forward(batch['input_ids'])
+        loss = self.loss(logits, batch['label']).mean()
+        return {'loss': loss, 'log': {'train_loss': loss}}
 
-    return loss.item(), len(data)
+    def validation_step(self, batch, batch_idx):
+        logits = self.forward(batch['input_ids'])
+        loss = self.loss(logits, batch['label'])
+        acc = (logits.argmax(-1) == batch['label']).float()
+        return {'loss': loss, 'acc': acc}
 
-def train(epochs, model, optimizer, loss_func, train_loader, valid_loader):
-    for epoch in range(epochs):
-        model.train()
+    def validation_epoch_end(self, outputs):
+        loss = th.cat([o['loss'] for o in outputs], 0).mean()
+        acc = th.cat([o['acc'] for o in outputs], 0).mean()
+        out = {'val_loss': loss, 'acc': acc}
+        print (f"Validation loss {loss}")
+        return {**out, 'log': out}
 
-        train_losses, train_nums = zip(*[
-            loss_batch(model, loss_func, x['input_ids'], x['label'], optimizer)
-                for x in train_loader
-        ])
+    def train_dataloader(self):
+        return th.utils.data.DataLoader(
+                self.train_ds,
+                batch_size=self.batch_size,
+                shuffle=True,
+                drop_last=True)
 
-        model.eval()
+    def val_dataloader(self):
+        return th.utils.data.DataLoader(
+                self.valid_ds,
+                batch_size=self.batch_size,
+                shuffle=False,
+                drop_last=False)
 
-        with th.no_grad():
-            valid_losses, valid_nums = zip(*[
-                loss_batch(model, loss_func, data, target)
-                    for data, target in valid_loader
-            ])
+    def configure_optimizers(self):
+        return th.optim.Adam(
+                self.model.parameters(),
+                lr=self.lr)
 
-        train_loss = get_loss(train_losses, train_nums)
-        valid_loss = get_loss(valid_losses, valid_nums)
-
-        print ('Train Epoch: {}\tTrain Loss: {:.6f}\tValid Loss: {:.6f}'.format(
-            epoch, train_loss, valid_loss))
 
 def main(*args, **kwargs):
-    # download and load data
-    train_ds, valid_ds = load_data()
-    train_dl = get_dl(train_ds, FLAGS.batch_size)
-    valid_dl = get_dl(valid_ds, FLAGS.batch_size)
+    flags.DEFINE_boolean('debug', False, '')
+    flags.DEFINE_integer('epochs', 1, '')
+    flags.DEFINE_integer('batch_size', 8, '')
+    flags.DEFINE_float('lr', 1e-2, '')
+    flags.DEFINE_float('momentum', .9, '')
+    flags.DEFINE_string('model', 'bert-base-uncased', '')
+    flags.DEFINE_integer('seq_length', 32, '')
+    flags.DEFINE_integer('percent', 5, '')
 
-    # get model
-    model = get_model(FLAGS.model)
-    opt = get_optimizer(model, FLAGS.lr, FLAGS.momentum)
+    FLAGS = flags.FLAGS
 
-    # use cross entropy loss
-    loss_func = th.nn.CrossEntropyLoss(reduction='none')
+    # logfile
+    sh.rm('-r', '-f', 'logs')
+    sh.mkdir('logs')
 
-    # train
-    train(FLAGS.epochs, model, opt, loss_func, train_dl, valid_dl)
+    params = dict(
+            batch_size=FLAGS.batch_size,
+            debug=FLAGS.debug,
+            percent=FLAGS.percent,
+            model=FLAGS.model,
+            seq_length=FLAGS.seq_length,
+            lr=FLAGS.lr)
+
+    model = IMDBSentimentClassifier(params)
+    trainer = pl.Trainer(
+            default_root_dir='logs',
+            gpus=(1 if th.cuda.is_available() else 0),
+            max_epochs=FLAGS.epochs,
+            fast_dev_run=FLAGS.debug,
+            logger=pl.loggers.TensorBoardLogger('logs', name='imdb', version=0)
+    )
+    trainer.fit(model)
 
 if __name__ == "__main__":
     app.run(main)
