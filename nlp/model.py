@@ -1,123 +1,129 @@
 import sh
 import nlp
+import random
 import transformers
 import torch as th
+import numpy as np
 import pytorch_lightning as pl
 
-from absl import logging, app, flags
-
 class SentimentClassifier(pl.LightningModule):
-    def __init__(self, params):
+    def __init__(self, hparams, train_ds, valid_ds):
         super().__init__()
-        self.train_ds = None
-        self.valid_ds = None
 
-        self.batch_size = params['batch_size']
-        self.debug = params['debug']
-        self.percent = params['percent']
-        self.model_name = params['model']
-        self.seq_length = params['seq_length']
-        self.lr = params['lr']
+        self.batch_size = hparams['batch_size']
+        self.debug = hparams['debug']
+        self.percent = hparams['percent']
+        self.model_name = hparams['model']
+        self.seq_length = hparams['seq_length']
+        self.lr = hparams['lr']
+        self.split = hparams['split']
+        self.num_workers = hparams['num_workers']
 
-        self.model = transformers.BertForSequenceClassification.from_pretrained(self.model_name)
-        self.loss = th.nn.CrossEntropyLoss(reduction='none') # TODO: what does reduction do?
+        self.train_ds = train_ds
+        self.valid_ds = valid_ds
 
+        self.roberta_config = transformers.RobertaConfig.from_pretrained(self.model_name, output_hidden_states=True)
+        self.model = transformers.RobertaModel.from_pretrained(self.model_name, config=self.roberta_config)
 
-    def prepare_data(self):
-        tokenizer = transformers.BertTokenizer.from_pretrained(self.model_name)
-        seq_length = self.seq_length
+        self.dropout = th.nn.Dropout(0.5) # TODO: what is dropout?
+        self.fc = th.nn.Linear(self.roberta_config.hidden_size, 2)
+        #th.nn.init.normal_(self.fc.weight, std=0.02)
+        #th.nn.init.normal_(self.fc.bias, std=0)
 
-        def _tokenize(x):
-            x['input_ids'] = tokenizer.batch_encode_plus(
-                    x['text'],
-                    max_length=seq_length,
-                    pad_to_max_length=True)['input_ids']
-            return x
+        #self.model2 = transformers.RobertaForSequenceClassification.from_pretrained(self.model_name)
 
-        def _prepare_ds(split):
-            ds = nlp.load_dataset('imdb', split=f'{split}[:{self.batch_size if self.debug else f"{self.percent}%"}]')
-            ds = ds.map(_tokenize, batched=True)
-            ds.set_format(type='torch', columns=['input_ids', 'label'])
-            return ds
+    def loss_fn(self, start_logits, end_logits, start_positions, end_positions):
+        ce_loss = th.nn.CrossEntropyLoss(reduction='none')
+        return (ce_loss(start_logits, start_positions) +
+                ce_loss(end_logits, end_positions))
 
-        self.train_ds, self.valid_ds = map(_prepare_ds, ('train', 'test'))
+    def compute_jacard_score(self, tweets, start_idx, end_idx, start_logits, end_logits, offsets):
+        def get_selected_text(tw, start, end, offsets):
+            res = ""
+            for ix in range(start, end+1):
+                res += tw[offsets[ix][0]:offsets[ix][1]]
+                if ix + 1 < len(offsets) and offsets[ix][1] < offsets[ix+1][0]:
+                    # need to add a space
+                    res += " "
+            return res
 
-    def forward(self, input_ids):
-        mask = (input_ids != 0).float()
-        logits, = self.model(input_ids, mask)
-        return logits
+        def jacard(x, y):
+            # TODO: verify this works properly
+            a = set(x.lower().split())
+            b = set(y.lower().split())
+            c = a.intersection(b)
+            return float(len(c)) / (len(a) + len(b) - len(c))
+
+        start_preds = np.argmax(start_logits, 1)
+        end_preds = np.argmax(end_logits, 1)
+
+        jact = []
+        for i, tw in enumerate(tweets):
+            if start_preds[i] > end_preds[i]:
+                sel = tw
+            else:
+                sel = get_selected_text(tw, start_preds[i], end_preds[i], offsets[i])
+
+            valid = get_selected_text(tw, start_idx[i], end_idx[i], offsets[i])
+            jact.append(jacard(sel, valid))
+
+        print (jact)
+        return th.tensor(jact)
+
+    def forward(self, batch):
+        _, _, hs = self.model(batch['ids'], batch['masks'])
+
+        # TODO
+        # 13 hidden states
+        # on the notebook they use only the last 3, I'm gonna use them all
+        # and watch for any differences
+        out = th.stack(hs)
+        out = th.mean(out, 0)
+        out = self.dropout(out)
+        out = self.fc(out)
+
+        start_logits, end_logits = [x.squeeze(-1) for x in out.split(1, dim=-1)]
+        return start_logits, end_logits
 
     def training_step(self, batch, batch_idx):
-        logits = self.forward(batch['input_ids'])
-        loss = self.loss(logits, batch['label']).mean()
+        start_logits, end_logits = self.forward(batch)
+        loss = self.loss_fn(start_logits, end_logits, batch['start_idx'], batch['end_idx']).mean()
         return {'loss': loss, 'log': {'train_loss': loss}}
 
     def validation_step(self, batch, batch_idx):
-        logits = self.forward(batch['input_ids'])
-        loss = self.loss(logits, batch['label'])
-        acc = (logits.argmax(-1) == batch['label']).float()
-        return {'loss': loss, 'acc': acc}
+        start_logits, end_logits = self.forward(batch)
+        loss = self.loss_fn(start_logits, end_logits, batch['start_idx'], batch['end_idx'])
+
+        jac = self.compute_jacard_score(
+                batch['tweet'],
+                batch['start_idx'],
+                batch['end_idx'],
+                start_logits,
+                end_logits,
+                batch['offsets'])
+        return {'loss': loss, 'jac': jac}
 
     def validation_epoch_end(self, outputs):
         loss = th.cat([o['loss'] for o in outputs], 0).mean()
-        acc = th.cat([o['acc'] for o in outputs], 0).mean()
-        out = {'val_loss': loss, 'acc': acc}
-        print (f"Validation loss {loss}")
+        jac = th.cat([o['jac'] for o in outputs], 0).mean()
+        out = {'val_loss': loss, 'val_jac': jac}
         return {**out, 'log': out}
 
     def train_dataloader(self):
         return th.utils.data.DataLoader(
                 self.train_ds,
                 batch_size=self.batch_size,
-                shuffle=True,
-                drop_last=True)
+                shuffle=False,
+                num_workers=8)
 
     def val_dataloader(self):
         return th.utils.data.DataLoader(
                 self.valid_ds,
                 batch_size=self.batch_size,
                 shuffle=False,
-                drop_last=False)
+                num_workers=8)
 
     def configure_optimizers(self):
         return th.optim.Adam(
                 self.model.parameters(),
                 lr=self.lr)
-
-
-def main(*args, **kwargs):
-    flags.DEFINE_boolean('debug', False, '')
-    flags.DEFINE_integer('epochs', 1, '')
-    flags.DEFINE_integer('batch_size', 8, '')
-    flags.DEFINE_float('lr', 1e-2, '')
-    flags.DEFINE_float('momentum', .9, '')
-    flags.DEFINE_string('model', 'bert-base-uncased', '')
-    flags.DEFINE_integer('seq_length', 32, '')
-    flags.DEFINE_integer('percent', 5, '')
-
-    FLAGS = flags.FLAGS
-
-    # logfile
-    sh.rm('-r', '-f', 'logs')
-    sh.mkdir('logs')
-
-    params = dict(
-            batch_size=FLAGS.batch_size,
-            debug=FLAGS.debug,
-            percent=FLAGS.percent,
-            model=FLAGS.model,
-            seq_length=FLAGS.seq_length,
-            lr=FLAGS.lr)
-
-    model = IMDBSentimentClassifier(params)
-    trainer = pl.Trainer(
-            default_root_dir='logs',
-            gpus=(1 if th.cuda.is_available() else 0),
-            max_epochs=FLAGS.epochs,
-            fast_dev_run=FLAGS.debug,
-            logger=pl.loggers.TensorBoardLogger('logs', name='imdb', version=0)
-    )
-    trainer.fit(model)
-
-if __name__ == "__main__":
-    app.run(main)
