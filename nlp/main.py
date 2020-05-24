@@ -45,6 +45,7 @@ def main(*args, **kwargs):
     skf = StratifiedKFold(n_splits=10, shuffle=True, random_state=FLAGS.seed)
 
     for fold, (train_idx, val_idx) in enumerate(skf.split(train_df, train_df.sentiment), start=1):
+        print (f"Fold {fold}")
         train_ds = TweetDataset(train_df.iloc[train_idx], FLAGS.model, FLAGS.seq_length)
         val_ds = TweetDataset(train_df.iloc[val_idx], FLAGS.model, FLAGS.seq_length)
 

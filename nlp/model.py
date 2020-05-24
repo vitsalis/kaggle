@@ -103,6 +103,7 @@ class SentimentClassifier(pl.LightningModule):
         loss = th.cat([o['loss'] for o in outputs], 0).mean()
         jac = th.cat([o['jac'] for o in outputs], 0).mean()
         out = {'val_loss': loss, 'val_jac': jac}
+        print ("Loss {:.4f} | Jaccard: {:.4f}".format(loss, jac))
         return {**out, 'log': out}
 
     def train_dataloader(self):
