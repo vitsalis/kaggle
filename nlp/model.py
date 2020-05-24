@@ -11,13 +11,10 @@ class SentimentClassifier(pl.LightningModule):
         super().__init__()
 
         self.batch_size = hparams['batch_size']
-        self.debug = hparams['debug']
-        self.percent = hparams['percent']
         self.model_name = hparams['model']
-        self.seq_length = hparams['seq_length']
         self.lr = hparams['lr']
-        self.split = hparams['split']
         self.num_workers = hparams['num_workers']
+        self.dropout_pct = hparams['dropout_pct']
 
         self.train_ds = train_ds
         self.valid_ds = valid_ds
@@ -25,10 +22,10 @@ class SentimentClassifier(pl.LightningModule):
         self.roberta_config = transformers.RobertaConfig.from_pretrained(self.model_name, output_hidden_states=True)
         self.model = transformers.RobertaModel.from_pretrained(self.model_name, config=self.roberta_config)
 
-        self.dropout = th.nn.Dropout(0.5) # TODO: what is dropout?
+        self.dropout = th.nn.Dropout(self.dropout_pct)
         self.fc = th.nn.Linear(self.roberta_config.hidden_size, 2)
-        #th.nn.init.normal_(self.fc.weight, std=0.02)
-        #th.nn.init.normal_(self.fc.bias, std=0)
+        th.nn.init.normal_(self.fc.weight, std=0.02)
+        th.nn.init.normal_(self.fc.bias, 0)
 
         #self.model2 = transformers.RobertaForSequenceClassification.from_pretrained(self.model_name)
 
@@ -48,7 +45,6 @@ class SentimentClassifier(pl.LightningModule):
             return res
 
         def jacard(x, y):
-            # TODO: verify this works properly
             a = set(x.lower().split())
             b = set(y.lower().split())
             c = a.intersection(b)
@@ -114,14 +110,14 @@ class SentimentClassifier(pl.LightningModule):
                 self.train_ds,
                 batch_size=self.batch_size,
                 shuffle=False,
-                num_workers=8)
+                num_workers=self.num_workers)
 
     def val_dataloader(self):
         return th.utils.data.DataLoader(
                 self.valid_ds,
                 batch_size=self.batch_size,
                 shuffle=False,
-                num_workers=8)
+                num_workers=self.num_workers)
 
     def configure_optimizers(self):
         return th.optim.Adam(
